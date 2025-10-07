@@ -22,3 +22,394 @@ execute:
   eval: false
   freeze: auto
 ---
+
+
+```{python}
+from pyspark.sql import SparkSession
+import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+import numpy as np
+
+np.random.seed(42)
+
+pio.renderers.default = "notebook+notebook_connected+vscode"
+
+# Initialize Spark Session
+spark = SparkSession.builder.appName("LightcastData").getOrCreate()
+
+# Load Data
+df = spark.read.option("header", "true").option("inferSchema", "true").option("multiLine","true").option("escape", "\"").csv("data/lightcast_job_postings.csv")
+
+# Show Schema and Sample Data
+print("---This is Diagnostic check, No need to print it in the final doc---")
+
+# df.printSchema() # comment this line when rendering the submission
+df.show(5)
+print(df.count())
+#pd.set_option("display.max_rows", None)  
+#pd.DataFrame(df.columns, columns=["Column Names"])
+```
+
+
+Feature Engineering is a crucial step in preparing your data for machine learning. In this lab, we will focus on the following tasks:
+
+1. Drop rows with missing values in the target variable and key features.
+2. By now you are already familiar with the code and the data. Based on your understanding please choose any 3 (my code output has 10) variables as:
+   1. three continuous variables and, `MIN_YEARS_EXPERIENCE` (total 4, use your best judgment!)
+   2. two categorical.
+   3. Your dependent variable (y) is `SALARY`.
+
+3. Convert categorical variables into numerical representations using StringIndexer and OneHotEncoder.
+4. Assemble features into a single vector using VectorAssembler.
+5. Split the data into training and testing sets.
+6. You can use pipeline to do the above steps in one go.
+7. Create a new column `MIN_YEARS_EXPERIENCE_SQ` by squaring the `MIN_YEARS_EXPERIENCE` column.
+8. Assemble the polynomial features into a new vector column `features_poly` using VectorAssembler.
+9. Show the final structure of the DataFrame with the new features.
+
+
+```{python}
+#| eval: true
+#| echo: false
+#| fig-align: center
+
+from pyspark.sql.functions import col, pow
+from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler
+from pyspark.ml import Pipeline
+
+eda_cols = [
+    "SALARY",
+    "MIN_YEARS_EXPERIENCE", "MAX_YEARS_EXPERIENCE", "DURATION",
+    "COMPANY_IS_STAFFING", "IS_INTERNSHIP",
+    "STATE_NAME", "REMOTE_TYPE_NAME", "EMPLOYMENT_TYPE_NAME",
+    "MIN_EDULEVELS_NAME", "MAX_EDULEVELS_NAME"
+]
+
+df_eda = df.select(eda_cols)
+df_eda.show(5, truncate=False)
+```
+
+```{python}
+from pyspark.sql.functions import col, sum as spark_sum, when, trim, length
+import hvplot.pandas  # enables hvplot on pandas
+
+missing_df = df_eda.select([
+    spark_sum(
+        when(col(c).isNull() | (length(trim(col(c))) == 0), 1)
+        .otherwise(0)
+    ).alias(c)
+    for c in df_eda.columns
+])
+
+#print(missing_df.show())
+
+#to table with T Transpose
+missing_pd = missing_df.toPandas().T.reset_index()
+#put names to columns
+missing_pd.columns = ["column", "missing_count"]
+
+total_rows = df_eda.count()
+missing_pd["missing_pct"] = 100 * missing_pd["missing_count"] / total_rows
+
+# hvplot.bar ; line; scatter; (hist); (box); area; (heatmap); (hexbin); points
+missing_pd.sort_values("missing_pct", ascending=False).hvplot.bar(
+    x="column", y="missing_pct", rot=90,
+    title="Percentage of Missing Values by Column",
+    height=600, width=900,
+    ylabel="Missing Percentage (%)", xlabel="Features"
+).opts(xrotation=45)
+```
+
+```{python}
+# For REMOTE_TYPE_NAME replace Remote with Remote, [None] with Undefined,
+# Not Remote with On Premise, Hybrid Remote with Hybrid, and Null with On Premise
+## data frame (eda) exploratory data analysis
+
+df_eda = df_eda.withColumn(
+    "REMOTE_TYPE_NAME",
+    when(col("REMOTE_TYPE_NAME") == "Remote", "Remote")
+    .when(col("REMOTE_TYPE_NAME") == "[None]", "Undefined")
+    .when(col("REMOTE_TYPE_NAME") == "Not Remote", "On-Premise")
+    .when(col("REMOTE_TYPE_NAME") == "Hybrid Remote", "Hybrid")
+    .when(col("REMOTE_TYPE_NAME").isNull(), "On-Premise")
+    .otherwise(col("REMOTE_TYPE_NAME"))
+)
+
+# df_eda.createOrReplaceTempView("df_eda")
+categorical_cols = [
+    "REMOTE_TYPE_NAME"
+]
+
+for colname in categorical_cols:
+    print(f"\n---- {colname} ----")
+    df_eda.select(colname).distinct().show(10, truncate=False)
+```
+
+```{python}
+# ---- EMPLOYMENT_TYPE_NAME ----
+                                                                                
+# +------------------------+
+# |EMPLOYMENT_TYPE_NAME    |
+# +------------------------+
+# |Part-time / full-time   |
+# |Part-time (â‰¤ 32 hours)|
+# |Full-time (> 32 hours)  |
+# |NULL                    |
+# +------------------------+
+
+df_eda = df_eda.withColumn(
+    "EMPLOYMENT_TYPE_NAME",
+    when(col("EMPLOYMENT_TYPE_NAME") == "Part-time / full-time", "Flexible")
+    .when(col("EMPLOYMENT_TYPE_NAME") == "Part-time (â‰¤ 32 hours)", "Parttime")
+    .when(col("EMPLOYMENT_TYPE_NAME") == "Full-time (> 32 hours)", "Fulltime")
+    .when(col("EMPLOYMENT_TYPE_NAME").isNull(), "Fulltime")
+    .otherwise(col("EMPLOYMENT_TYPE_NAME"))
+)
+
+# df_eda.createOrReplaceTempView("df_eda")
+categorical_cols = [
+    "EMPLOYMENT_TYPE_NAME"
+]
+
+for colname in categorical_cols:
+    print(f"\n---- {colname} ----")
+    df_eda.select(colname).distinct().show(10, truncate=False)
+```
+
+```{python}
+# replace COMPANY_IS_STAFFING NULL with false, and IS_INTERNSHIP NULL with false
+df_eda = df_eda.withColumn(
+    "COMPANY_IS_STAFFING",
+    when(col("COMPANY_IS_STAFFING").isNull(), False)
+    .otherwise(col("COMPANY_IS_STAFFING"))
+)
+
+df_eda = df_eda.withColumn(
+    "IS_INTERNSHIP",
+    when(col("IS_INTERNSHIP").isNull(), False)
+    .otherwise(col("IS_INTERNSHIP"))
+)
+
+# df_eda.createOrReplaceTempView("df_eda")
+categorical_cols = [
+    "COMPANY_IS_STAFFING", "IS_INTERNSHIP"
+]
+
+for colname in categorical_cols:
+    print(f"\n---- {colname} ----")
+    df_eda.select(colname).distinct().show(10, truncate=False)
+```
+
+```{python}
+import pandas as pd
+
+# sample subset of data only 1% of the data
+df_sample = df_eda.sample(fraction=0.01, seed=42).toPandas()
+
+#print(df_eda.count())  #72498
+#print(len(df_sample))  #790
+
+# create new DataFrame where each cell missing (True) or not (False)
+missing_mask = df_sample.isnull()
+
+# Melt into long-form  | 4 columns: index, column, is_missing
+missing_long = (
+    missing_mask.reset_index()
+    .melt(id_vars="index", var_name="column", value_name="is_missing")
+)
+
+# Convert boolean to int
+missing_long["is_missing"] = missing_long["is_missing"].astype(int)
+
+print(missing_long)
+
+# Plot heatmap
+missing_long.hvplot.heatmap(
+    x="column", y="index", C="is_missing",
+    cmap="Reds", colorbar=False,
+    width=900, height=700,
+    title="Heatmap of Missing Values (Sample)"
+).opts(xrotation=45)
+```
+
+```{python}
+from pyspark.sql.functions import countDistinct
+
+#show number of unique values per column
+df_eda.select([
+    countDistinct(c).alias(c + "_nunique")
+    for c in df_eda.columns
+]).show(truncate=False)
+```
+
+```{python}
+categorical_cols = [
+    "STATE_NAME", "REMOTE_TYPE_NAME", "EMPLOYMENT_TYPE_NAME",
+    "MIN_EDULEVELS_NAME", "COMPANY_IS_STAFFING", "IS_INTERNSHIP"
+]
+
+for colname in categorical_cols:
+    print(f"\n---- {colname} ----")
+    df_eda.select(colname).distinct().show(10, truncate=False)
+```
+
+```{python}
+# Calculate median of the Duration Column
+
+median_duration = df_eda.approxQuantile("DURATION", [0.5], 0.01)[0]
+
+# Check for missing values in Duration column and replace null with median
+
+df_eda = df_eda.withColumn(
+    "DURATION",
+    when(col("DURATION").isNull(), median_duration)
+    .otherwise(col("DURATION"))
+) # Assuming median duration is 30 days
+```
+
+```{python}
+import pandas as pd
+
+# sample subset of data
+df_sample = df_eda.sample(fraction=0.10, seed=42).toPandas()
+
+# Boolean mask (True if missing)
+missing_mask = df_sample.isnull()
+
+# Melt into long-form
+missing_long = (
+    missing_mask.reset_index()
+    .melt(id_vars="index", var_name="column", value_name="is_missing")
+)
+
+# Convert boolean to int
+missing_long["is_missing"] = missing_long["is_missing"].astype(int)
+
+# Plot heatmap
+missing_long.hvplot.heatmap(
+    x="column", y="index", C="is_missing",
+    cmap="Reds", colorbar=False,
+    width=900, height=700,
+    title="Heatmap of Missing Values (Sample)"
+).opts(xrotation=45)
+```
+
+```{python}
+df_eda.show(5, truncate=False)
+```
+
+```{python}
+# Drop rows with NA values in relevant columns
+df_feature_engg = df_eda.dropna(subset=[
+    "SALARY", "MIN_YEARS_EXPERIENCE", "MAX_YEARS_EXPERIENCE","STATE_NAME",
+     "EMPLOYMENT_TYPE_NAME", "REMOTE_TYPE_NAME","MIN_EDULEVELS_NAME",
+    "DURATION", "IS_INTERNSHIP", "COMPANY_IS_STAFFING"
+])
+
+# Categorical columns
+categorical_cols = ["STATE_NAME","MIN_EDULEVELS_NAME","EMPLOYMENT_TYPE_NAME", "REMOTE_TYPE_NAME"]
+
+# Index and One-Hot Encode
+indexers = [StringIndexer(inputCol=col, outputCol=f"{col}_idx", handleInvalid='skip') for col in categorical_cols]
+encoders = [OneHotEncoder(inputCol=f"{col}_idx", outputCol=f"{col}_vec") for col in categorical_cols]
+
+pipeline = Pipeline(stages=indexers)
+indexed_df = pipeline.fit(df_feature_engg).transform(df_feature_engg)
+indexed_df.select("EMPLOYMENT_TYPE_NAME","EMPLOYMENT_TYPE_NAME_idx","REMOTE_TYPE_NAME","REMOTE_TYPE_NAME_idx").show()
+
+pipeline = Pipeline(stages=indexers + encoders)
+encoded_df = pipeline.fit(df_feature_engg).transform(df_feature_engg)
+encoded_df.show()
+
+```
+
+```{python}
+
+
+# Assemble base features (for GLR and Random Forest)
+assembler = VectorAssembler(
+    inputCols=[
+        "MIN_YEARS_EXPERIENCE", "DURATION",
+        "IS_INTERNSHIP", "COMPANY_IS_STAFFING"
+    ] + [f"{col}_vec" for col in categorical_cols],
+    outputCol="features"
+)
+
+# Build pipeline and transform
+pipeline = Pipeline(stages=indexers + encoders + [assembler])
+data = pipeline.fit(df_feature_engg).transform(df_feature_engg)
+
+data.show(5, truncate=False)
+
+# Create squared term for Polynomial Regression
+data = data.withColumn("MIN_YEARS_EXPERIENCE_SQ", pow(col("MIN_YEARS_EXPERIENCE"), 2))
+
+# Assemble polynomial features
+assembler_poly = VectorAssembler(
+    inputCols=[
+        "MIN_YEARS_EXPERIENCE", "MIN_YEARS_EXPERIENCE_SQ",
+        "DURATION", "IS_INTERNSHIP", "COMPANY_IS_STAFFING"
+    ] + [f"{col}_vec" for col in categorical_cols],
+    outputCol="features_poly"
+    
+)
+
+data=assembler_poly.transform(data)
+
+#show final structure
+data.select("SALARY", "features", "features_poly").show(5, truncate=False)
+
+
+
+
+
+```
+
+```{python}
+#| eval: true
+#| echo: false
+#| fig-align: center
+
+# Split Data
+regression_train, regression_test = data.randomSplit([0.8, 0.2], seed=42)
+print((data.count(), len(data.columns)))
+print((regression_train.count(), len(regression_train.columns)))
+print((regression_test.count(), len(regression_test.columns)))
+```
+
+```{python}
+from pyspark.ml.regression import LinearRegression
+
+# Initialize  Regression model
+# Basic Linear Regression model
+mr = LinearRegression(featuresCol="features", labelCol="SALARY")
+
+# Polynomial Regression using squared term features
+#mr = LinearRegression(featuresCol="features_poly", labelCol="SALARY")
+
+# Generalized Linear Regression (supports distributions like Gaussian, Poisson)
+    # mr = GeneralizedLinearRegression(
+    #     featuresCol="features", labelCol="SALARY",
+    #     family="gaussian", link="identity"
+    # )
+
+
+# Train the model
+mr_model = mr.fit(regression_train)
+
+# Evaluate on test data
+test_results = mr_model.evaluate(regression_test)
+
+# Print metrics
+print("RMSE:", test_results.rootMeanSquaredError)
+print("R2:", test_results.r2)
+```
+
+```{python}
+coeffs = mr_model.coefficients
+intercept = mr_model.intercept
+
+print("Intercept:", intercept)
+print("Coefficients:", coeffs)
+```
