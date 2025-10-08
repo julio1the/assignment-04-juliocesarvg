@@ -166,7 +166,7 @@ encoders = [OneHotEncoder(inputCol=f"{col}_idx", outputCol=f"{col}_vec") for col
 # Assemble base features (for GLR and Random Forest)
 assembler = VectorAssembler(
     inputCols=[
-        "MIN_YEARS_EXPERIENCE", "DURATION"
+        "MIN_YEARS_EXPERIENCEMIN_YEARS_EXPERIENCE", "DURATION"
     ] + [f"{col}_vec" for col in categorical_cols],
     outputCol="features"
 )
